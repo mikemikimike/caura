@@ -819,6 +819,30 @@ def _configure_logging_impl(
 
     root.setLevel(min_level)
 
+    # Route `warnings.warn()` through logging instead of letting it write
+    # straight to stderr. Cloud Run derives a log's status from the stream it
+    # arrived on, so a bare stderr warning lands in Datadog as
+    # ``status:error`` — same false-error mechanism this module's header
+    # describes for uvicorn's supervisor lines, reaching Datadog by a
+    # different route.
+    #
+    # Measured before this: 1,543 of 1,550 error-status logs from staging
+    # core-api over 6h (99.5%) were one third-party DeprecationWarning-class
+    # warning, at ~257/hour. Error rate and Error Tracking for that service
+    # were almost entirely this.
+    #
+    # captureWarnings sends them to the `py.warnings` logger, which has no
+    # handler of its own and propagates to the root handler installed above —
+    # so they emit as JSON at WARNING, and stay visible without counting as
+    # errors.
+    #
+    # Only warnings raised AFTER this call are captured, which makes the
+    # import order in each service's app.py load-bearing: configure_logging()
+    # runs before the heavyweight imports, so warnings raised while those
+    # modules are defined are caught. Moving an import above that call would
+    # silently send its warnings back to stderr.
+    logging.captureWarnings(True)
+
     # Silence noisy dependency loggers so INFO traffic from httpx's
     # per-request lines and google-auth token refreshes doesn't drown the
     # app's own entries. Target `google.auth`/`google.auth.transport`
